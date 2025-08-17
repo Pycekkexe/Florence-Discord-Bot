@@ -91,25 +91,6 @@ async def test_connectivity():
             # Test DNS resolution
             socket.getaddrinfo(host, 443, socket.AF_INET)
             print(f"✅ DNS OK: {host}")
-            
-            # Test HTTP connection
-            connector = aiohttp.TCPConnector(
-                resolver=aiohttp.resolver.AsyncResolver(
-                    nameservers=['8.8.8.8', '8.8.4.4', '1.1.1.1']
-                ),
-                ttl_dns_cache=300,
-                use_dns_cache=True,
-                enable_cleanup_closed=True
-            )
-            
-            timeout = ClientTimeout(total=10)
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                try:
-                    async with session.get(f'https://{host}', ssl=False) as response:
-                        print(f"✅ HTTP OK: {host} (Status: {response.status})")
-                except Exception as e:
-                    print(f"⚠️ HTTP Issue: {host} - {e}")
-                    
         except socket.gaierror as e:
             print(f"❌ DNS FAILED: {host} - {e}")
         except Exception as e:
@@ -134,7 +115,7 @@ class TFTRankFetcher:
         timeout = ClientTimeout(total=20, connect=10)
         return aiohttp.ClientSession(connector=connector, timeout=timeout)
         
-    async def get_summoner_by_riot_id(self, game_name, tag_line, region, max_retries=3):
+    async def get_summoner_by_riot_id(self, game_name, tag_line, region, max_retries=2):
         """Get summoner info by Riot ID with enhanced error handling"""
         account_regions = {
             'na1': 'americas', 'br1': 'americas', 'la1': 'americas', 'la2': 'americas', 'oc1': 'americas',
@@ -186,19 +167,19 @@ class TFTRankFetcher:
             except Exception as e:
                 print(f"❌ Attempt {attempt + 1} failed for {game_name}#{tag_line}: {e}")
                 if attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) + 1
+                    wait_time = 3
                     print(f"⚠️ Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
                     print(f"❌ All attempts failed for {game_name}#{tag_line}")
-                    raise e
+                    return None
             finally:
                 if session:
                     await session.close()
         
         return None
     
-    async def get_tft_rank(self, summoner_id, region, max_retries=3):
+    async def get_tft_rank(self, summoner_id, region, max_retries=2):
         """Get TFT rank for a summoner"""
         for attempt in range(max_retries):
             session = None
@@ -224,11 +205,10 @@ class TFTRankFetcher:
                         
             except Exception as e:
                 if attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) + 1
-                    await asyncio.sleep(wait_time)
+                    await asyncio.sleep(3)
                     continue
                 else:
-                    raise e
+                    return None
             finally:
                 if session:
                     await session.close()
@@ -311,3 +291,77 @@ async def flo_leaderboard(ctx):
             summoner_data = await tft_bot.fetcher.get_summoner_by_riot_id(summoner_name, tag_line, region)
             if summoner_data:
                 rank_data = await tft_bot.fetcher.get_tft_rank(summoner_data['id'], region)
+                
+                if rank_data:
+                    tier = rank_data.get('tier', 'UNRANKED')
+                    rank = rank_data.get('rank', '')
+                    lp = rank_data.get('leaguePoints', 0)
+                    wins = rank_data.get('wins', 0)
+                    losses = rank_data.get('losses', 0)
+                    
+                    score = calculate_rank_score(tier, rank, lp)
+                    
+                    player_ranks.append({
+                        'name': summoner_name,
+                        'tag': tag_line,
+                        'region': region,
+                        'tier': tier,
+                        'rank': rank,
+                        'lp': lp,
+                        'wins': wins,
+                        'losses': losses,
+                        'score': score,
+                        'level': summoner_data.get('summonerLevel', 'Unknown')
+                    })
+                else:
+                    player_ranks.append({
+                        'name': summoner_name,
+                        'tag': tag_line,
+                        'region': region,
+                        'tier': 'UNRANKED',
+                        'rank': '',
+                        'lp': 0,
+                        'wins': 0,
+                        'losses': 0,
+                        'score': 0,
+                        'level': summoner_data.get('summonerLevel', 'Unknown')
+                    })
+            else:
+                player_ranks.append({
+                    'name': summoner_name,
+                    'tag': tag_line,
+                    'region': region,
+                    'tier': 'NOT_FOUND',
+                    'rank': '',
+                    'lp': 0,
+                    'wins': 0,
+                    'losses': 0,
+                    'score': -2,
+                    'level': 'Unknown'
+                })
+                
+        except Exception as e:
+            print(f"Error fetching rank for {summoner_name}#{tag_line}: {e}")
+            player_ranks.append({
+                'name': summoner_name,
+                'tag': tag_line,
+                'region': region,
+                'tier': 'API_ERROR',
+                'rank': '',
+                'lp': 0,
+                'wins': 0,
+                'losses': 0,
+                'score': -1,
+                'level': 'Unknown'
+            })
+            continue
+    
+    player_ranks.sort(key=lambda x: x['score'], reverse=True)
+    
+    embed = discord.Embed(
+        title="🏆 FLO TFT LEADERBOARD 🏆",
+        description="Current rankings for all tracked players",
+        color=0xffd700,
+        timestamp=datetime.now()
+    )
+    
