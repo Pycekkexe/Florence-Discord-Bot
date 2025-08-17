@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands
 import aiohttp
@@ -175,6 +174,193 @@ async def on_ready():
     print(f'{bot.user} has connected to Discord!')
     print(f'Bot is ready to track TFT ranks!')
     print(f'Default players loaded: {len(DEFAULT_PLAYERS)}')
+
+@bot.command(name='flo')
+async def flo_leaderboard(ctx):
+    """Display TFT leaderboard with detailed rank information"""
+    conn = sqlite3.connect('tft_players.db')
+    cursor = conn.cursor()
+    
+    # Get all players (default + user added)
+    cursor.execute('''
+        SELECT summoner_name, tag_line, puuid, region FROM players
+        ORDER BY is_default DESC, summoner_name
+    ''')
+    
+    players = cursor.fetchall()
+    conn.close()
+    
+    if not players:
+        await ctx.send("❌ No players found in database!")
+        return
+    
+    # Show loading message with custom styling
+    loading_embed = discord.Embed(
+        title="🔄 Fetching TFT Ranks...",
+        description="Please wait while I gather the latest rank data",
+        color=0x3498db
+    )
+    loading_msg = await ctx.send(embed=loading_embed)
+    
+    player_ranks = []
+    
+    for summoner_name, tag_line, puuid, region in players:
+        try:
+            # Get summoner info first
+            summoner_data = await tft_bot.fetcher.get_summoner_by_riot_id(summoner_name, tag_line, region)
+            if summoner_data:
+                rank_data = await tft_bot.fetcher.get_tft_rank(summoner_data['id'], region)
+                
+                if rank_data:
+                    tier = rank_data.get('tier', 'UNRANKED')
+                    rank = rank_data.get('rank', '')
+                    lp = rank_data.get('leaguePoints', 0)
+                    wins = rank_data.get('wins', 0)
+                    losses = rank_data.get('losses', 0)
+                    
+                    score = calculate_rank_score(tier, rank, lp)
+                    
+                    player_ranks.append({
+                        'name': summoner_name,
+                        'tag': tag_line,
+                        'region': region,
+                        'tier': tier,
+                        'rank': rank,
+                        'lp': lp,
+                        'wins': wins,
+                        'losses': losses,
+                        'score': score,
+                        'level': summoner_data.get('summonerLevel', 'Unknown')
+                    })
+                else:
+                    # Unranked player
+                    player_ranks.append({
+                        'name': summoner_name,
+                        'tag': tag_line,
+                        'region': region,
+                        'tier': 'UNRANKED',
+                        'rank': '',
+                        'lp': 0,
+                        'wins': 0,
+                        'losses': 0,
+                        'score': 0,
+                        'level': summoner_data.get('summonerLevel', 'Unknown')
+                    })
+        except Exception as e:
+            print(f"Error fetching rank for {summoner_name}#{tag_line}: {e}")
+            # Add as API error if fetch fails
+            player_ranks.append({
+                'name': summoner_name,
+                'tag': tag_line,
+                'region': region,
+                'tier': 'API_ERROR',
+                'rank': '',
+                'lp': 0,
+                'wins': 0,
+                'losses': 0,
+                'score': -1,
+                'level': 'Unknown'
+            })
+            continue
+    
+    # Sort by rank score (highest first)
+    player_ranks.sort(key=lambda x: x['score'], reverse=True)
+    
+    # Create main leaderboard embed
+    embed = discord.Embed(
+        title="🏆 FLO TFT LEADERBOARD 🏆",
+        description="Current rankings for all tracked players",
+        color=0xffd700,
+        timestamp=datetime.now()
+    )
+    
+    # Split into chunks for multiple fields if needed
+    leaderboard_chunks = []
+    current_chunk = ""
+    
+    for i, player in enumerate(player_ranks, 1):
+        # Position emoji
+        if i == 1:
+            position_emoji = "🥇"
+        elif i == 2:
+            position_emoji = "🥈"
+        elif i == 3:
+            position_emoji = "🥉"
+        else:
+            position_emoji = f"#{i}"
+        
+        # Handle different rank states
+        if player['tier'] == 'API_ERROR':
+            rank_emoji = "❌"
+            rank_text = "API Error"
+            winrate_text = "N/A"
+        elif player['tier'] == 'UNRANKED':
+            rank_emoji = "🔸"
+            rank_text = "Unranked"
+            winrate_text = "N/A"
+        else:
+            rank_emoji = get_rank_emoji(player['tier'], player['rank'])
+            if player['tier'] in ['MASTER', 'GRANDMASTER', 'CHALLENGER']:
+                rank_text = f"{player['tier'].title()} {player['lp']} LP"
+            else:
+                rank_text = f"{player['tier'].title()} {player['rank']} {player['lp']} LP"
+            
+            total_games = player['wins'] + player['losses']
+            if total_games > 0:
+                winrate = round((player['wins'] / total_games * 100), 1)
+                winrate_text = f"{player['wins']}W {player['losses']}L ({winrate}%)"
+            else:
+                winrate_text = "No games played"
+        
+        # Format player entry
+        player_entry = f"{position_emoji} {rank_emoji} **{player['name']}#{player['tag']}**\n"
+        player_entry += f"    🌍 {player['region'].upper()} | {rank_text}\n"
+        player_entry += f"    📊 {winrate_text} | Level {player['level']}\n\n"
+        
+        # Check if adding this entry would exceed Discord's field limit
+        if len(current_chunk + player_entry) > 1024:
+            leaderboard_chunks.append(current_chunk)
+            current_chunk = player_entry
+        else:
+            current_chunk += player_entry
+    
+    # Add the last chunk
+    if current_chunk:
+        leaderboard_chunks.append(current_chunk)
+    
+    # Add fields to embed
+    for i, chunk in enumerate(leaderboard_chunks):
+        field_name = "Rankings" if i == 0 else f"Rankings (continued {i+1})"
+        embed.add_field(name=field_name, value=chunk, inline=False)
+    
+    # Add statistics
+    total_players = len(player_ranks)
+    ranked_players = len([p for p in player_ranks if p['tier'] not in ['UNRANKED', 'API_ERROR']])
+    
+    stats_text = f"👥 Total Players: {total_players}\n"
+    stats_text += f"🎯 Ranked Players: {ranked_players}\n"
+    stats_text += f"🔸 Unranked: {total_players - ranked_players}\n"
+    
+    # Find highest rank
+    if ranked_players > 0:
+        highest_rank_player = next((p for p in player_ranks if p['tier'] not in ['UNRANKED', 'API_ERROR']), None)
+        if highest_rank_player:
+            if highest_rank_player['tier'] in ['MASTER', 'GRANDMASTER', 'CHALLENGER']:
+                highest_rank_text = f"{highest_rank_player['tier'].title()} {highest_rank_player['lp']} LP"
+            else:
+                highest_rank_text = f"{highest_rank_player['tier'].title()} {highest_rank_player['rank']}"
+            stats_text += f"👑 Highest: {highest_rank_player['name']} ({highest_rank_text})"
+    
+    embed.add_field(name="📈 Statistics", value=stats_text, inline=False)
+    
+    # Footer with additional info
+    embed.set_footer(
+        text="Use !rank <name> <tag> <region> for detailed player info | Updated every use",
+        icon_url="https://storage.googleapis.com/workspace-0f70711f-8b4e-4d94-86f1-2a93ccde5887/image/6c1b1562-0c5e-4d79-9c9d-86f5c0b90e1f.png"
+    )
+    
+    # Update the loading message with results
+    await loading_msg.edit(embed=embed)
 
 @bot.command(name='add_player')
 async def add_player(ctx, game_name: str, tag_line: str, region: str = "euw1"):
@@ -506,6 +692,7 @@ async def help_tft(ctx):
     )
     
     commands_text = """
+    `!flo` - Show detailed TFT leaderboard (main command)
     `!add_player <name> <tag> <region>` - Add a player to track
     `!remove_player <name> <tag> <region>` - Remove a tracked player
     `!my_players` - Show your tracked players
@@ -522,7 +709,7 @@ async def help_tft(ctx):
     
     embed.add_field(
         name="Examples", 
-        value="`!add_player Doublelift NA1 na1`\n`!leaderboard default`\n`!rank Faker T1 kr`", 
+        value="`!flo` - Main leaderboard\n`!add_player Doublelift NA1 na1`\n`!rank Faker T1 kr`", 
         inline=False
     )
     
