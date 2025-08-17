@@ -15,7 +15,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # API Configuration
-RIOT_API_KEY = ""  # Replace with your actual API key
+RIOT_API_KEY = ""
 BASE_URL = "https://{region}.api.riotgames.com"
 
 # TFT Rank hierarchy for proper sorting
@@ -95,7 +95,6 @@ class TFTRankFetcher:
         
     async def get_summoner_by_riot_id(self, game_name, tag_line, region, max_retries=3):
         """Get summoner info by Riot ID with retry logic"""
-        # Map region to account region for Riot ID lookup
         account_regions = {
             'na1': 'americas', 'br1': 'americas', 'la1': 'americas', 'la2': 'americas', 'oc1': 'americas',
             'euw1': 'europe', 'eune1': 'europe', 'tr1': 'europe', 'ru': 'europe',
@@ -106,11 +105,10 @@ class TFTRankFetcher:
         
         for attempt in range(max_retries):
             try:
-                # First get PUUID from account API
                 account_url = f"https://{account_region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}"
                 headers = {"X-Riot-Token": self.api_key}
                 
-                timeout = ClientTimeout(total=15)  # 15 second timeout
+                timeout = ClientTimeout(total=15)
                 
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.get(account_url, headers=headers) as response:
@@ -118,7 +116,6 @@ class TFTRankFetcher:
                             account_data = await response.json()
                             puuid = account_data['puuid']
                             
-                            # Then get summoner data using PUUID
                             summoner_url = f"{BASE_URL.format(region=region)}/tft/summoner/v1/summoners/by-puuid/{puuid}"
                             async with session.get(summoner_url, headers=headers) as summoner_response:
                                 if summoner_response.status == 200:
@@ -132,7 +129,7 @@ class TFTRankFetcher:
                                     raise Exception(f"Summoner API Error: {summoner_response.status}")
                         elif response.status == 404:
                             return None
-                        elif response.status == 429:  # Rate limit
+                        elif response.status == 429:
                             retry_after = int(response.headers.get('Retry-After', 1))
                             print(f"⚠️ Rate limited, waiting {retry_after}s...")
                             await asyncio.sleep(retry_after)
@@ -142,7 +139,7 @@ class TFTRankFetcher:
                             
             except (ClientError, asyncio.TimeoutError) as e:
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff
+                    wait_time = 2 ** attempt
                     print(f"⚠️ Attempt {attempt + 1} failed for {game_name}#{tag_line}, retrying in {wait_time}s... Error: {e}")
                     await asyncio.sleep(wait_time)
                     continue
@@ -165,12 +162,11 @@ class TFTRankFetcher:
                     async with session.get(url, headers=headers) as response:
                         if response.status == 200:
                             data = await response.json()
-                            # Find TFT ranked entry
                             for entry in data:
                                 if entry.get('queueType') == 'RANKED_TFT':
                                     return entry
                             return None
-                        elif response.status == 429:  # Rate limit
+                        elif response.status == 429:
                             retry_after = int(response.headers.get('Retry-After', 1))
                             print(f"⚠️ Rate limited, waiting {retry_after}s...")
                             await asyncio.sleep(retry_after)
@@ -224,30 +220,12 @@ async def on_ready():
     print(f'Bot is ready to track TFT ranks!')
     print(f'Default players loaded: {len(DEFAULT_PLAYERS)}')
 
-@bot.command(name='test_connection')
-async def test_connection(ctx):
-    """Test API connection"""
-    try:
-        # Test with a simple player lookup
-        test_msg = await ctx.send("🔍 Testing API connection...")
-        
-        summoner_data = await tft_bot.fetcher.get_summoner_by_riot_id("Gemini Brimstone", "ISAAC", "eune1")
-        
-        if summoner_data:
-            await test_msg.edit(content="✅ API connection successful!")
-        else:
-            await test_msg.edit(content="❌ Player not found, but API is responding")
-            
-    except Exception as e:
-        await ctx.send(f"❌ API connection failed: {str(e)}")
-
 @bot.command(name='flo')
 async def flo_leaderboard(ctx):
     """Display TFT leaderboard with detailed rank information"""
     conn = sqlite3.connect('tft_players.db')
     cursor = conn.cursor()
     
-    # Get all players (default + user added)
     cursor.execute('''
         SELECT summoner_name, tag_line, puuid, region FROM players
         ORDER BY is_default DESC, summoner_name
@@ -260,7 +238,6 @@ async def flo_leaderboard(ctx):
         await ctx.send("❌ No players found in database!")
         return
     
-    # Show loading message with custom styling
     loading_embed = discord.Embed(
         title="🔄 Fetching TFT Ranks...",
         description=f"Please wait while I gather the latest rank data for {len(players)} players",
@@ -275,12 +252,10 @@ async def flo_leaderboard(ctx):
         try:
             processed += 1
             
-            # Update loading message every few players
             if processed % 2 == 0:
                 loading_embed.description = f"Processing player {processed}/{len(players)}... ({summoner_name}#{tag_line})"
                 await loading_msg.edit(embed=loading_embed)
             
-            # Get summoner info first
             summoner_data = await tft_bot.fetcher.get_summoner_by_riot_id(summoner_name, tag_line, region)
             if summoner_data:
                 rank_data = await tft_bot.fetcher.get_tft_rank(summoner_data['id'], region)
@@ -307,7 +282,6 @@ async def flo_leaderboard(ctx):
                         'level': summoner_data.get('summonerLevel', 'Unknown')
                     })
                 else:
-                    # Unranked player
                     player_ranks.append({
                         'name': summoner_name,
                         'tag': tag_line,
@@ -321,7 +295,6 @@ async def flo_leaderboard(ctx):
                         'level': summoner_data.get('summonerLevel', 'Unknown')
                     })
             else:
-                # Player not found
                 player_ranks.append({
                     'name': summoner_name,
                     'tag': tag_line,
@@ -337,7 +310,6 @@ async def flo_leaderboard(ctx):
                 
         except Exception as e:
             print(f"Error fetching rank for {summoner_name}#{tag_line}: {e}")
-            # Add as API error if fetch fails
             player_ranks.append({
                 'name': summoner_name,
                 'tag': tag_line,
@@ -352,10 +324,8 @@ async def flo_leaderboard(ctx):
             })
             continue
     
-    # Sort by rank score (highest first)
     player_ranks.sort(key=lambda x: x['score'], reverse=True)
     
-    # Create main leaderboard embed
     embed = discord.Embed(
         title="🏆 FLO TFT LEADERBOARD 🏆",
         description="Current rankings for all tracked players",
@@ -363,22 +333,134 @@ async def flo_leaderboard(ctx):
         timestamp=datetime.now()
     )
     
-    # Split into chunks for multiple fields if needed
     leaderboard_chunks = []
     current_chunk = ""
+    
+    for i, player in enumerate(player_ranks, 1):
+        if i == 1:
+            position_emoji = "🥇"
+        elif i == 2:
+            position_emoji = "🥈"
+        elif i == 3:
+            position_emoji = "🥉"
+        else:
+            position_emoji = f"#{i}"
+        
+        if player['tier'] == 'API_ERROR':
+            rank_emoji = "❌"
+            rank_text = "API Error"
+            winrate_text = "N/A"
+        elif player['tier'] == 'NOT_FOUND':
+            rank_emoji = "❓"
+            rank_text = "Not Found"
+            winrate_text = "N/A"
+        elif player['tier'] == 'UNRANKED':
+            rank_emoji = "🔸"
+            rank_text = "Unranked"
+            winrate_text = "N/A"
+        else:
+            rank_emoji = get_rank_emoji(player['tier'], player['rank'])
+            if player['tier'] in ['MASTER', 'GRANDMASTER', 'CHALLENGER']:
+                rank_text = f"{player['tier'].title()} {player['lp']} LP"
+            else:
+                rank_text = f"{player['tier'].title()} {player['rank']} {player['lp']} LP"
+            
+            total_games = player['wins'] + player['losses']
+            if total_games > 0:
+                winrate = round((player['wins'] / total_games * 100), 1)
+                winrate_text = f"{player['wins']}W {player['losses']}L ({winrate}%)"
+            else:
+                winrate_text = "No games played"
+        
+        player_entry = f"{position_emoji} {rank_emoji} **{player['name']}#{player['tag']}**\n"
+        player_entry += f"    🌍 {player['region'].upper()} | {rank_text}\n"
+        player_entry += f"    📊 {winrate_text} | Level {player['level']}\n\n"
+        
+        if len(current_chunk + player_entry) > 1024:
+            leaderboard_chunks.append(current_chunk)
+            current_chunk = player_entry
+        else:
+            current_chunk += player_entry
+    
+    if current_chunk:
+        leaderboard_chunks.append(current_chunk)
+    
+    for i, chunk in enumerate(leaderboard_chunks):
+        field_name = "Rankings" if i == 0 else f"Rankings (continued {i+1})"
+        embed.add_field(name=field_name, value=chunk, inline=False)
+    
+    total_players = len(player_ranks)
+    ranked_players = len([p for p in player_ranks if p['tier'] not in ['UNRANKED', 'API_ERROR', 'NOT_FOUND']])
+    
+    stats_text = f"👥 Total Players: {total_players}\n"
+    stats_text += f"🎯 Ranked Players: {ranked_players}\n"
+    stats_text += f"🔸 Unranked: {total_players - ranked_players}\n"
+    
+    if ranked_players > 0:
+        highest_rank_player = next((p for p in player_ranks if p['tier'] not in ['UNRANKED', 'API_ERROR', 'NOT_FOUND']), None)
+        if highest_rank_player:
+            if highest_rank_player['tier'] in ['MASTER', 'GRANDMASTER', 'CHALLENGER']:
+                highest_rank_text = f"{highest_rank_player['tier'].title()} {highest_rank_player['lp']} LP"
+            else:
+                highest_rank_text = f"{highest_rank_player['tier'].title()} {highest_rank_player['rank']}"
+            stats_text += f"👑 Highest: {highest_rank_player['name']} ({highest_rank_text})"
+    
+    embed.add_field(name="📈 Statistics", value=stats_text, inline=False)
+    
+    embed.set_footer(
+        text="Use !rank <name> <tag> <region> for detailed player info | Updated every use"
+    )
+    
+    await loading_msg.edit(embed=embed)
 
-    if __name__ == "__main__":
+@bot.command(name='help_tft')
+async def help_tft(ctx):
+    """Show help for TFT commands"""
+    embed = discord.Embed(
+        title="🎮 TFT Rank Bot Commands",
+        description="Track and compare Teamfight Tactics ranks using Riot ID!",
+        color=0x9b59b6
+    )
+    
+    commands_text = """
+    `!flo` - Show detailed TFT leaderboard (main command)
+    `!help_tft` - Show this help message
+    """
+    
+    embed.add_field(name="Commands", value=commands_text, inline=False)
+    
+    default_text = ""
+    for player in DEFAULT_PLAYERS:
+        default_text += f"• {player['summoner_name']}#{player['tag']} ({player['region'].upper()})\n"
+    
+    embed.add_field(name="Default Players", value=default_text, inline=False)
+    
+    embed.set_footer(text="Made with ❤️ for TFT players | Uses new Riot ID system")
+    
+    await ctx.send(embed=embed)
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Missing required argument. Use `!help_tft` for command usage.")
+    elif isinstance(error, commands.CommandNotFound):
+        pass
+    else:
+        await ctx.send(f"❌ An error occurred: {str(error)}")
+
+# Run the bot with proper token handling
+if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("❌ Usage: python bot.py <BOT_TOKEN>")
-        print("Example: python bot.py MTQwMDk5NDEyOTM3...")
-        exit(1)
+        print("❌ Usage: python app.py <BOT_TOKEN>")
+        print("Example: python app.py MTQwMDk5NDEyOTM3...")
+        sys.exit(1)
     
     BOT_TOKEN = sys.argv[1]
     
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ Please provide a valid bot token!")
-        exit(1)
+        sys.exit(1)
     
     print("✅ Starting bot...")
     bot.run(BOT_TOKEN)
-    for
+
