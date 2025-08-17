@@ -7,7 +7,6 @@ import json
 import sqlite3
 from datetime import datetime
 import os
-import sys
 
 # Bot setup
 intents = discord.Intents.default()
@@ -16,6 +15,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # API Configuration
 RIOT_API_KEY = ""
+BOT_TOKEN = "YOUR_NEW_BOT_TOKEN_HERE"  # Replace with your actual bot token
 BASE_URL = "https://{region}.api.riotgames.com"
 
 # TFT Rank hierarchy for proper sorting
@@ -413,6 +413,103 @@ async def flo_leaderboard(ctx):
     
     await loading_msg.edit(embed=embed)
 
+@bot.command(name='add_player')
+async def add_player(ctx, game_name: str, tag_line: str, region: str = "eune1"):
+    """Add a player to track their TFT rank using Riot ID (Name#TAG)"""
+    region = region.lower()
+    valid_regions = ["na1", "euw1", "eune1", "kr", "jp1", "br1", "la1", "la2", "oc1", "tr1", "ru"]
+    
+    if region not in valid_regions:
+        await ctx.send(f"❌ Invalid region. Valid regions: {', '.join(valid_regions)}")
+        return
+    
+    try:
+        loading_msg = await ctx.send(f"🔍 Searching for summoner **{game_name}#{tag_line}** in **{region.upper()}**...")
+        
+        summoner_data = await tft_bot.fetcher.get_summoner_by_riot_id(game_name, tag_line, region)
+        
+        if not summoner_data:
+            await loading_msg.edit(content=f"❌ Summoner **{game_name}#{tag_line}** not found in **{region.upper()}**")
+            return
+        
+        conn = sqlite3.connect('tft_players.db')
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO players (discord_user_id, summoner_name, tag_line, puuid, region, last_updated, is_default)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (str(ctx.author.id), game_name, tag_line, summoner_data['puuid'], region, datetime.now(), 0))
+            conn.commit()
+            
+            await loading_msg.edit(content=f"✅ Successfully added **{game_name}#{tag_line}** from **{region.upper()}** to tracking!")
+            
+        except sqlite3.IntegrityError:
+            await loading_msg.edit(content=f"⚠️ **{game_name}#{tag_line}** from **{region.upper()}** is already being tracked!")
+        
+        conn.close()
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error adding player: {str(e)}")
+
+@bot.command(name='rank')
+async def get_rank(ctx, game_name: str, tag_line: str, region: str = "eune1"):
+    """Get TFT rank for a specific player using Riot ID"""
+    region = region.lower()
+    
+    try:
+        loading_msg = await ctx.send(f"🔍 Looking up **{game_name}#{tag_line}** in **{region.upper()}**...")
+        
+        summoner_data = await tft_bot.fetcher.get_summoner_by_riot_id(game_name, tag_line, region)
+        
+        if not summoner_data:
+            await loading_msg.edit(content=f"❌ Summoner **{game_name}#{tag_line}** not found in **{region.upper()}**")
+            return
+        
+        rank_data = await tft_bot.fetcher.get_tft_rank(summoner_data['id'], region)
+        
+        embed = discord.Embed(
+            title=f"🎯 TFT Rank - {game_name}#{tag_line}",
+            color=0x3498db,
+            timestamp=datetime.now()
+        )
+        
+        if rank_data:
+            tier = rank_data.get('tier', 'UNRANKED')
+            rank = rank_data.get('rank', '')
+            lp = rank_data.get('leaguePoints', 0)
+            wins = rank_data.get('wins', 0)
+            losses = rank_data.get('losses', 0)
+            
+            rank_emoji = get_rank_emoji(tier, rank)
+            
+            if tier in ['MASTER', 'GRANDMASTER', 'CHALLENGER']:
+                rank_text = f"{rank_emoji} {tier.title()} {lp} LP"
+            else:
+                rank_text = f"{rank_emoji} {tier.title()} {rank} {lp} LP"
+            
+            winrate = round((wins / (wins + losses) * 100), 1) if (wins + losses) > 0 else 0
+            total_games = wins + losses
+            
+            embed.add_field(name="Current Rank", value=rank_text, inline=True)
+            embed.add_field(name="LP", value=f"{lp} LP", inline=True)
+            embed.add_field(name="Region", value=region.upper(), inline=True)
+            embed.add_field(name="Wins", value=str(wins), inline=True)
+            embed.add_field(name="Losses", value=str(losses), inline=True)
+            embed.add_field(name="Win Rate", value=f"{winrate}%", inline=True)
+            embed.add_field(name="Total Games", value=str(total_games), inline=True)
+            
+        else:
+            embed.add_field(name="Rank Status", value="🔸 Unranked", inline=False)
+            embed.add_field(name="Region", value=region.upper(), inline=True)
+        
+        embed.set_footer(text=f"Summoner Level: {summoner_data.get('summonerLevel', 'Unknown')}")
+        
+        await loading_msg.edit(content="", embed=embed)
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error fetching rank: {str(e)}")
+
 @bot.command(name='help_tft')
 async def help_tft(ctx):
     """Show help for TFT commands"""
@@ -424,10 +521,18 @@ async def help_tft(ctx):
     
     commands_text = """
     `!flo` - Show detailed TFT leaderboard (main command)
+    `!add_player <name> <tag> [region]` - Add a player to track
+    `!rank <name> <tag> [region]` - Get rank for any player
     `!help_tft` - Show this help message
     """
     
     embed.add_field(name="Commands", value=commands_text, inline=False)
+    
+    embed.add_field(
+        name="Examples", 
+        value="`!flo` - Main leaderboard\n`!add_player SomePlayer TAG1 eune1`\n`!rank Faker T1 kr`", 
+        inline=False
+    )
     
     default_text = ""
     for player in DEFAULT_PLAYERS:
@@ -448,19 +553,13 @@ async def on_command_error(ctx, error):
     else:
         await ctx.send(f"❌ An error occurred: {str(error)}")
 
-# Run the bot with proper token handling
+# Run the bot
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("❌ Usage: python app.py <BOT_TOKEN>")
-        print("Example: python app.py MTQwMDk5NDEyOTM3...")
-        sys.exit(1)
-    
-    BOT_TOKEN = sys.argv[1]
-    
-    if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ Please provide a valid bot token!")
-        sys.exit(1)
+    if BOT_TOKEN == "YOUR_NEW_BOT_TOKEN_HERE":
+        print("❌ Please replace BOT_TOKEN with your actual Discord bot token!")
+        exit(1)
     
     print("✅ Starting bot...")
     bot.run(BOT_TOKEN)
+
 
